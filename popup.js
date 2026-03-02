@@ -1,6 +1,6 @@
 /**
  * popup.js: The logic behind the extension's popup UI.
- * This script runs in the context of the extension's popup window.
+ * Multi-Provider Support: Gemini, OpenAI, and xAI (Grok).
  */
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -8,47 +8,104 @@ document.addEventListener('DOMContentLoaded', async () => {
     const commandInput = document.getElementById('commandInput');
     const statusArea = document.getElementById('statusArea');
 
-    // 1. Check if the Chrome Prompt API is available
-    async function initModel() {
-        try {
-            // Note: window.ai is the experimental entry point for Gemini Nano in Chrome
-            if (!window.ai || !window.ai.languageModel) {
-                statusArea.textContent = "Status: Prompt API not found. Please check your Chrome flags.";
-                runBtn.disabled = true;
-                return null;
-            }
-            statusArea.textContent = "Status: Ready";
-            return true;
-        } catch (err) {
-            statusArea.textContent = "Status: Error checking API";
-            return null;
-        }
+    let activeSettings = {};
+
+    /**
+     * loadSettings: Retrieves multi-provider settings from chrome.storage.local.
+     */
+    async function loadSettings() {
+        return new Promise((resolve) => {
+            chrome.storage.local.get({
+                activeProvider: 'gemini',
+                providers: {
+                    gemini: { model: 'gemini-2.0-flash', key: '' },
+                    openai: { model: 'gpt-4o', key: '' },
+                    xai: { model: 'grok-2-latest', key: '' }
+                }
+            }, (items) => {
+                const provider = items.activeProvider;
+                activeSettings = {
+                    provider: provider,
+                    model: items.providers[provider]?.model,
+                    key: items.providers[provider]?.key
+                };
+
+                if (!activeSettings.key) {
+                    statusArea.innerHTML = `Status: <span style="color: #991b1b">Set API key for ${provider.toUpperCase()} in Options</span>`;
+                    runBtn.disabled = true;
+                } else {
+                    statusArea.textContent = `Status: ${provider.toUpperCase()} (${activeSettings.model})`;
+                    runBtn.disabled = false;
+                }
+                resolve(activeSettings);
+            });
+        });
     }
 
-    await initModel();
+    await loadSettings();
+
+    /**
+     * callAI: Interacts with the selected provider using the AIHandler.
+     */
+    async function callAI(elements, userCommand) {
+        let url = "";
+        let headers = { "Content-Type": "application/json" };
+
+        if (activeSettings.provider === 'gemini') {
+            url = `https://generativelanguage.googleapis.com/v1beta/models/${activeSettings.model}:generateContent?key=${activeSettings.key}`;
+        } else {
+            url = activeSettings.provider === 'openai'
+                ? "https://api.openai.com/v1/chat/completions"
+                : "https://api.x.ai/v1/chat/completions";
+            headers["Authorization"] = `Bearer ${activeSettings.key}`;
+        }
+
+        // Use the centralized handler to bridge the gap between providers
+        const body = AIHandler.constructRequestBody(
+            activeSettings.provider,
+            activeSettings.model,
+            elements,
+            userCommand
+        );
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: headers,
+            body: JSON.stringify(body)
+        });
+
+        if (!response.ok) {
+            let errorMsg = `HTTP ${response.status}`;
+            try {
+                const error = await response.json();
+                errorMsg = error.error?.message || JSON.stringify(error);
+            } catch (e) { /* response wasn't JSON */ }
+            throw new Error(errorMsg);
+        }
+
+        const data = await response.json();
+        return AIHandler.parseResponse(activeSettings.provider, data);
+    }
 
     runBtn.addEventListener('click', async () => {
         const command = commandInput.value.trim();
         if (!command) return;
 
+        runBtn.disabled = true;
         statusArea.textContent = "Status: Analyzing page...";
 
-        // 2. Identify the active tab
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-        // 3. Inject logic into the page to find interactive elements
-        // We use chrome.scripting.executeScript to run code on the actual website
+        // Get interactive elements
         const [{ result: elements }] = await chrome.scripting.executeScript({
             target: { tabId: tab.id },
             func: () => {
-                // This function runs INSIDE the webpage, not the popup
-                const interactive = Array.from(document.querySelectorAll('button, input, a, [role="button"]'))
+                return Array.from(document.querySelectorAll('button, input, a, [role="button"]'))
                     .filter(el => {
                         const rect = el.getBoundingClientRect();
-                        return rect.width > 0 && rect.height > 0; // Only visible elements
+                        return rect.width > 0 && rect.height > 0;
                     })
                     .map((el, index) => {
-                        // Tag each element so we can find it again later
                         el.setAttribute('data-nl-id', index.toString());
                         return {
                             id: index,
@@ -57,45 +114,33 @@ document.addEventListener('DOMContentLoaded', async () => {
                             type: el.type || ''
                         };
                     });
-                return interactive;
             }
         });
 
-        console.log("Scanned elements:", elements);
-        statusArea.textContent = "Status: Asking AI...";
+        statusArea.textContent = `Status: Asking ${activeSettings.provider.toUpperCase()}...`;
 
         try {
-            // 4. Create a session with the local model
-            const session = await window.ai.languageModel.create({
-                systemPrompt: "You are a browser assistant. Based on the provided list of elements, return a JSON object with the action and the data-nl-id."
-            });
-
-            // 5. Send elements + command to the AI
-            const prompt = `Elements: ${JSON.stringify(elements)}\nCommand: "${command}"`;
-            const response = await session.prompt(prompt);
-
-            // Clean up the response to find the JSON part
-            const jsonPart = response.match(/\{.*\}/s);
-            const action = JSON.parse(jsonPart ? jsonPart[0] : response);
-
+            const action = await callAI(elements, command);
             statusArea.textContent = `Status: Executing ${action.action}...`;
 
-            // 6. Send a message to content.js to perform the action
-            // Instead of injecting code, we send a message to the script already running on the page
             chrome.tabs.sendMessage(tab.id, {
                 type: "PERFORM_ACTION",
                 action: action
-            }, (response) => {
+            }, (res) => {
+                runBtn.disabled = false;
                 if (chrome.runtime.lastError) {
-                    statusArea.textContent = "Status: Error - " + chrome.runtime.lastError.message;
-                } else if (response && response.success) {
-                    statusArea.textContent = "Status: Done!";
+                    statusArea.textContent = "Error: " + chrome.runtime.lastError.message;
+                } else if (res && res.success) {
+                    statusArea.textContent = "Status: Success!";
                 } else {
-                    statusArea.textContent = "Status: Failed - " + (response?.error || "Unknown error");
+                    statusArea.textContent = "Status: Failed - " + (res?.error || "Unknown error");
                 }
             });
+
         } catch (err) {
+            console.error(err);
             statusArea.textContent = "Status: AI Error - " + err.message;
+            runBtn.disabled = false;
         }
     });
 });

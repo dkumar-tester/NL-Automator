@@ -8,9 +8,15 @@
     "scripting",
     "storage"
   ],
+  "host_permissions": [
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.openai.com/*",
+    "https://api.x.ai/*"
+  ],
   "action": {
     "default_popup": "popup.html"
   },
+  "options_page": "options.html",
   "content_scripts": [
     {
       "matches": [
