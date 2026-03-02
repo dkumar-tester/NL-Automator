@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Shadow DOM & Iframe Test</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        .section { border: 1px solid #ccc; padding: 10px; margin-bottom: 20px; }
+        iframe { width: 100%; height: 150px; border: 1px dashed red; }
+    </style>
+</head>
+<body>
+    <h1>NL-Automator Test Page</h1>
+
+    <div class="section">
+        <h2>Regular DOM</h2>
+        <button id="regularBtn">Regular Button</button>
+        <input type="text" placeholder="Regular Input">
+    </div>
+
+    <div class="section">
+        <h2>Shadow DOM</h2>
+        <div id="shadowHost"></div>
+    </div>
+
+    <div class="section">
+        <h2>Iframe</h2>
+        <iframe srcdoc="
+            <html>
+            <head>
+                <style>body { font-family: sans-serif; background: #f0f0f0; }</style>
+            </head>
+            <body>
+                <h3>Inside Iframe</h3>
+                <button id='iframeBtn'>Iframe Button</button>
+                <input type='text' placeholder='Iframe Input'>
+            </body>
+            </html>
+        "></iframe>
+    </div>
+
+    <script>
+        // Setup Shadow DOM
+        const host = document.getElementById('shadowHost');
+        const shadow = host.attachShadow({ mode: 'open' });
+        shadow.innerHTML = `
+            <style>
+                .shadow-box { border: 1px solid blue; padding: 10px; }
+                button { background: lightblue; }
+            </style>
+            <div class='shadow-box'>
+                <h3>Inside Shadow DOM</h3>
+                <button id='shadowBtn'>Shadow Button</button>
+                <input type='text' placeholder='Shadow Input'>
+            </div>
+        `;
+        
+        // Add click listeners to verify actions
+        document.getElementById('regularBtn').onclick = () => alert('Regular Button Clicked');
+        shadow.getElementById('shadowBtn').onclick = () => alert('Shadow Button Clicked');
+        
+        // Note: Iframe button alert would need to be in the srcdoc script
+    </script>
+</body>
+</html>

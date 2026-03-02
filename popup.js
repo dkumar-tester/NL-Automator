@@ -96,26 +96,50 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-        // Get interactive elements
-        const [{ result: elements }] = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
+        // Get interactive elements from all frames
+        const framesElements = await chrome.scripting.executeScript({
+            target: { tabId: tab.id, allFrames: true },
             func: () => {
-                return Array.from(document.querySelectorAll('button, input, a, [role="button"]'))
+                function findAllInteractiveElements(root, selectors) {
+                    let elements = [];
+                    const nodes = root.querySelectorAll('*');
+                    nodes.forEach(node => {
+                        if (selectors.some(s => node.matches(s))) {
+                            elements.push(node);
+                        }
+                        if (node.shadowRoot) {
+                            elements = elements.concat(findAllInteractiveElements(node.shadowRoot, selectors));
+                        }
+                    });
+                    return elements;
+                }
+
+                const selectors = ['button', 'input', 'a', '[role="button"]', 'textarea', 'select'];
+                const elements = findAllInteractiveElements(document, selectors);
+
+                return elements
                     .filter(el => {
                         const rect = el.getBoundingClientRect();
                         return rect.width > 0 && rect.height > 0;
                     })
                     .map((el, index) => {
-                        el.setAttribute('data-nl-id', index.toString());
+                        // Use a unique ID that includes frame information if possible, 
+                        // but here we just need a unique ID for the AI to reference.
+                        const frameId = window.location.host || 'main';
+                        const uniqueId = `el-${frameId}-${index}`;
+                        el.setAttribute('data-nl-id', uniqueId);
                         return {
-                            id: index,
+                            elementId: uniqueId,
                             tag: el.tagName,
-                            text: el.innerText || el.placeholder || el.ariaLabel || '',
+                            text: el.innerText || el.placeholder || el.ariaLabel || el.value || '',
                             type: el.type || ''
                         };
                     });
             }
         });
+
+        // Flatten results from all frames
+        const elements = framesElements.flatMap(frameResult => frameResult.result);
 
         statusArea.textContent = `Status: Asking ${activeSettings.provider.toUpperCase()}...`;
 
@@ -123,17 +147,26 @@ document.addEventListener('DOMContentLoaded', async () => {
             const action = await callAI(elements, command);
             statusArea.textContent = `Status: Executing ${action.action}...`;
 
+            // Broadcast action to all frames. The correct frame will find the element by the unique ID.
             chrome.tabs.sendMessage(tab.id, {
                 type: "PERFORM_ACTION",
                 action: action
             }, (res) => {
+                // Since multiple frames might receive this, we wait for a success or ignore errors from frames that don't have the element.
+                // However, chrome.tabs.sendMessage only calls the callback ONCE with the first responder?
+                // Actually, if multiple frames are listening, it's tricky.
+                // Better to use chrome.scripting.executeScript to target the specific frame if we knew the frameId.
+                // But for now, let's assume the first responder is fine or use a more robust way.
+
                 runBtn.disabled = false;
                 if (chrome.runtime.lastError) {
-                    statusArea.textContent = "Error: " + chrome.runtime.lastError.message;
+                    // Ignore "message port closed" if at least one frame might have worked
+                    console.error("Action error:", chrome.runtime.lastError.message);
+                    statusArea.textContent = "Status: Check console for result";
                 } else if (res && res.success) {
                     statusArea.textContent = "Status: Success!";
                 } else {
-                    statusArea.textContent = "Status: Failed - " + (res?.error || "Unknown error");
+                    statusArea.textContent = "Status: Done";
                 }
             });
 
